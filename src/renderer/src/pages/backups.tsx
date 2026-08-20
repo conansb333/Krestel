@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FolderOpen, History, Trash2 } from 'lucide-react'
+import { FolderOpen, HardDriveDownload, History, Trash2 } from 'lucide-react'
 import { useStore } from '@/state/store'
 import { api } from '@/lib/ipc'
 import { formatBytes, formatDate } from '@/lib/format'
@@ -25,6 +25,7 @@ export function BackupsPage(): React.JSX.Element {
   const { backups, refreshBackups, admin } = useStore()
   const [restoreDir, setRestoreDir] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [createOpen, setCreateOpen] = useState(false)
 
   const handleDelete = async (): Promise<void> => {
     if (!deleteTarget) return
@@ -41,12 +42,17 @@ export function BackupsPage(): React.JSX.Element {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Backups</h1>
           <p className="text-sm text-muted-foreground">
-            Registry exports, service manifests and scheduled task XML created before each removal.
+            Registry exports, service manifests and scheduled task XML - created before each removal, or any time you want.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void api.openBackupsFolder()}>
-          <FolderOpen className="h-4 w-4" /> Open folder
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" disabled={!admin} onClick={() => setCreateOpen(true)}>
+            <HardDriveDownload className="h-4 w-4" /> Create backup
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void api.openBackupsFolder()}>
+            <FolderOpen className="h-4 w-4" /> Open folder
+          </Button>
+        </div>
       </div>
 
       {backups.length === 0 ? (
@@ -55,9 +61,12 @@ export function BackupsPage(): React.JSX.Element {
             <History className="h-8 w-8 text-muted-foreground" />
             <p className="text-sm font-medium">No backups yet</p>
             <p className="max-w-md text-xs text-muted-foreground">
-              A backup is created automatically before every Remove action (unless disabled in Components). It contains
-              everything Restore needs to rebuild Defender on this machine.
+              A backup is created automatically before every Remove action (unless disabled in Components). You can also
+              create one right now - it is read-only and safe to run at any time.
             </p>
+            <Button size="sm" className="mt-2" disabled={!admin} onClick={() => setCreateOpen(true)}>
+              <HardDriveDownload className="h-4 w-4" /> Create backup now
+            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -95,6 +104,12 @@ export function BackupsPage(): React.JSX.Element {
           </div>
         </ScrollArea>
       )}
+
+      <PlanDialog
+        open={createOpen}
+        onOpenChange={(o) => { if (!o) setCreateOpen(false) }}
+        mode="backup"
+      />
 
       <PlanDialog
         open={restoreDir !== null}

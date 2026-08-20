@@ -12,7 +12,8 @@ const os = require('node:os')
 const wait = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 
 const root = path.resolve(__dirname, '..')
-const installerPath = path.join(root, 'dist', 'installer', 'Krestel-Setup-1.0.0.exe')
+const version = require(path.join(root, 'package.json')).version
+const installerPath = path.join(root, 'dist', 'installer', `Krestel-Setup-${version}.exe`)
 const installDir = path.join(os.tmpdir(), 'krestel-install-test')
 const appExe = path.join(installDir, 'Krestel.exe')
 const APP_ID = '{30C16215-C348-4C97-B696-4EC63F6B7A02}_is1'
@@ -57,6 +58,10 @@ function main() {
   reg && reg.includes('Krestel') ? ok('Add/Remove Programs entry present') : fail(`uninstall registry entry missing (${regKey})`)
 
   console.log('== Launching installed app (8s smoke) ==')
+  // a stray Krestel instance would hold the single-instance lock and make the
+  // freshly launched one exit immediately - clear strays first
+  spawnSync('taskkill', ['/IM', 'Krestel.exe', '/F'])
+  wait(1000)
   const launched = spawn(appExe, [], { detached: true, stdio: 'ignore', cwd: installDir })
   launched.unref()
   wait(8000)

@@ -1,4 +1,4 @@
-export type ActionMode = 'disable' | 'enable' | 'remove' | 'restore'
+export type ActionMode = 'disable' | 'enable' | 'remove' | 'restore' | 'backup'
 
 export type RiskLevel = 'safe' | 'moderate' | 'destructive'
 

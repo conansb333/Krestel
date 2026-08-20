@@ -282,6 +282,38 @@ function buildEnableSteps(steps: StepDef[]): void {
   )
 }
 
+/** PowerShell body of the full backup step (registry, services, tasks) - shared by Remove and manual Backup. */
+function backupStepPs(backupDir: string, mode: string): string[] {
+  const svcKeys: Array<[string, string]> = [
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', 'svc-WinDefend.reg'],
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdNisSvc', 'svc-WdNisSvc.reg'],
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdFilter', 'drv-WdFilter.reg'],
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdBoot', 'drv-WdBoot.reg'],
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdNisDrv', 'drv-WdNisDrv.reg'],
+    ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\SecurityHealthService', 'svc-SecurityHealthService.reg'],
+    ['HKLM\\SOFTWARE\\Microsoft\\Windows Defender', 'sw-WindowsDefender.reg'],
+    ['HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender', 'sw-Policies.reg']
+  ]
+  const regExportLines = svcKeys.map(
+    ([key, file]) =>
+      `if (Test-Path ('Registry::' + ${psq(key)})) { reg.exe export ${psq(key)} (Join-Path $dir ${psq(file)}) /y | Out-Null; Log ("Exported " + ${psq(key)}) }`
+  )
+  return [
+    `$dir = ${psq(backupDir)}`,
+    'New-Item -ItemType Directory -Force -Path $dir | Out-Null',
+    "$names = 'WinDefend','WdNisSvc','SecurityHealthService','wscsvc','Sense','WdFilter','WdBoot','WdNisDrv'",
+    'Get-CimInstance Win32_Service | Where-Object { $names -contains $_.Name } | Select-Object Name,DisplayName,StartMode,State,PathName,StartName,ServiceType,DelayedAutoStart | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $dir "services.json") -Encoding UTF8',
+    'Get-CimInstance Win32_SystemDriver | Where-Object { $names -contains $_.Name } | Select-Object Name,DisplayName,StartMode,State,PathName,ServiceType | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $dir "drivers.json") -Encoding UTF8',
+    ...regExportLines,
+    'Get-ScheduledTask -TaskPath "\\Microsoft\\Windows\\Windows Defender\\" -ErrorAction SilentlyContinue | ForEach-Object {',
+    "  $safe = ($_.TaskName -replace '[^A-Za-z0-9._-]', '_')",
+    "  Export-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath | Set-Content (Join-Path $dir ('task-' + $safe + '.xml')) -Encoding Unicode",
+    '}',
+    `@{ createdAt = (Get-Date).ToString("o"); app = "Krestel"; mode = ${psq(mode)} } | ConvertTo-Json | Set-Content (Join-Path $dir "manifest.json") -Encoding UTF8`,
+    'Log ("Backup written to " + $dir)'
+  ]
+}
+
 async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options: PlanOptions): Promise<void> {
   const c = settings.components
 
@@ -308,23 +340,8 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
   if (c.smartScreen) pushStep(steps, 'sms', 'Disable SmartScreen', 'Turns off SmartScreen via policy.', 'moderate', 'smartScreen', disableSmartScreenPs())
   pushStep(steps, 'svc-stop', 'Stop and disable services', 'Stops everything before deletion.', 'moderate', 'services', stopAndDisablePs(['WinDefend', 'WdNisSvc']))
 
-  let backupDir = ''
-  if (options.backup) {
-    backupDir = await createBackupDir()
-    const svcKeys: Array<[string, string]> = [
-      ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', 'svc-WinDefend.reg'],
-      ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdNisSvc', 'svc-WdNisSvc.reg'],
-      ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdFilter', 'drv-WdFilter.reg'],
-      ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdBoot', 'drv-WdBoot.reg'],
-      ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\WdNisDrv', 'drv-WdNisDrv.reg'],
-      ['HKLM\\SYSTEM\\CurrentControlSet\\Services\\SecurityHealthService', 'svc-SecurityHealthService.reg'],
-      ['HKLM\\SOFTWARE\\Microsoft\\Windows Defender', 'sw-WindowsDefender.reg'],
-      ['HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender', 'sw-Policies.reg']
-    ]
-    const regExportLines = svcKeys.map(
-      ([key, file]) =>
-        `if (Test-Path ('Registry::' + ${psq(key)})) { reg.exe export ${psq(key)} (Join-Path $dir ${psq(file)}) /y | Out-Null; Log ("Exported " + ${psq(key)}) }`
-    )
+  if (options.backup && !options.dryRun) {
+    const backupDir = await createBackupDir()
     pushStep(
       steps,
       'bak',
@@ -332,20 +349,7 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       `Full export to ${backupDir}: service/driver configs as JSON, scheduled tasks as XML, all affected registry keys as .reg files.`,
       'safe',
       'common',
-      [
-        `$dir = ${psq(backupDir)}`,
-        'New-Item -ItemType Directory -Force -Path $dir | Out-Null',
-        "$names = 'WinDefend','WdNisSvc','SecurityHealthService','wscsvc','Sense','WdFilter','WdBoot','WdNisDrv'",
-        'Get-CimInstance Win32_Service | Where-Object { $names -contains $_.Name } | Select-Object Name,DisplayName,StartMode,State,PathName,StartName,ServiceType,DelayedAutoStart | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $dir "services.json") -Encoding UTF8',
-        'Get-CimInstance Win32_SystemDriver | Where-Object { $names -contains $_.Name } | Select-Object Name,DisplayName,StartMode,State,PathName,ServiceType | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $dir "drivers.json") -Encoding UTF8',
-        ...regExportLines,
-        'Get-ScheduledTask -TaskPath "\\Microsoft\\Windows\\Windows Defender\\" -ErrorAction SilentlyContinue | ForEach-Object {',
-        "  $safe = ($_.TaskName -replace '[^A-Za-z0-9._-]', '_')",
-        "  Export-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath | Set-Content (Join-Path $dir ('task-' + $safe + '.xml')) -Encoding Unicode",
-        '}',
-        '@{ createdAt = (Get-Date).ToString("o"); app = "Krestel"; mode = "remove" } | ConvertTo-Json | Set-Content (Join-Path $dir "manifest.json") -Encoding UTF8',
-        'Log ("Backup written to " + $dir)'
-      ]
+      backupStepPs(backupDir, 'remove')
     )
   }
 
@@ -730,7 +734,21 @@ const MODE_SUMMARY: Record<ActionMode, string> = {
   disable: 'Disables real-time protection, services and telemetry via policy - fully reversible with Enable.',
   enable: 'Removes policy overrides, re-enables and starts Defender services.',
   remove: 'Permanently removes the selected Defender components. A backup is written first when enabled.',
-  restore: 'Restores Defender from a backup (registry, tasks, services) and re-enables protection.'
+  restore: 'Restores Defender from a backup (registry, tasks, services) and re-enables protection.',
+  backup: 'Creates a full backup right now: registry exports, service/driver manifests and scheduled task XML. Nothing on the system is changed.'
+}
+
+async function buildBackupSteps(steps: StepDef[], options: PlanOptions): Promise<void> {
+  const backupDir = options.dryRun ? '(dry-run: no directory created)' : await createBackupDir()
+  pushStep(
+    steps,
+    'bak',
+    'Back up services, tasks and registry',
+    `Full export to ${backupDir}: service/driver configs as JSON, scheduled tasks as XML, all affected registry keys as .reg files. Read-only - safe to run at any time.`,
+    'safe',
+    'common',
+    backupStepPs(options.dryRun ? 'DRYRUN' : backupDir, 'manual')
+  )
 }
 
 export async function buildExecutablePlan(
@@ -749,6 +767,7 @@ export async function buildExecutablePlan(
   if (mode === 'disable') buildDisableSteps(settings, steps, options)
   else if (mode === 'enable') buildEnableSteps(steps)
   else if (mode === 'remove') await buildRemoveSteps(settings, steps, options)
+  else if (mode === 'backup') await buildBackupSteps(steps, options)
   else buildRestoreSteps(settings, steps, options)
 
   const plan: Plan = {
