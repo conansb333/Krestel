@@ -194,7 +194,13 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
 
   const relaunchElevated = useCallback(async (): Promise<void> => {
     setElevating(true)
-    appendLogs([{ ts: Date.now(), kind: 'system', text: 'Requesting elevation (UAC)...' }])
+    appendLogs([
+      {
+        ts: Date.now(),
+        kind: 'system',
+        text: 'Restarting elevated: this window closes, then Windows shows a UAC prompt. If you decline it, the app restarts normally instead.'
+      }
+    ])
     await api.relaunchElevated()
   }, [appendLogs])
 
