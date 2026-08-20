@@ -11,9 +11,9 @@ A modern desktop application to **inspect, disable, enable, remove and restore W
 
 ## Why this exists
 
-Community tools like [windows-defender-remover](https://github.com/ionuttbara/windows-defender-remover) get the job done with batch scripts, but they are all-or-nothing: no preview of what will run, no backup, no restore, and no visibility while they run. Krestel is a from-scratch take on the same task with a proper safety model:
+Tweaking Windows Defender has always meant running opaque scripts or registry hacks: no preview of what will run, no backup, no restore, and no visibility while they run. Krestel makes the same job safe and transparent, with a proper safety model around every action:
 
-| | Batch-script tools | Krestel |
+| | Script-only approach | Krestel |
 |---|---|---|
 | Plan preview | ❌ | ✅ every step listed before execution |
 | Dry run | ❌ | ✅ run any action without changing the system |
@@ -33,6 +33,10 @@ Community tools like [windows-defender-remover](https://github.com/ionuttbara/wi
 - The status probe detects the exact build and adapts (e.g. the Windows Security app package only exists on 1809+; ATP components only in enterprise environments).
 - Windows 7/8.1 use a different (MSE-era) Defender stack and are reported as unsupported.
 - Electron itself requires Windows 10+; there are no plans to support older kernels.
+
+## Download
+
+Grab the latest installer from the [**Releases**](https://github.com/conansb333/krestel/releases) page — download `Krestel-Setup-<version>.exe` and run it. The installer bundles everything (no prerequisites) and registers a clean uninstaller in Add/Remove Programs.
 
 ## Getting started
 

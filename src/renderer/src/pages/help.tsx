@@ -115,21 +115,11 @@ export function HelpPage(): React.JSX.Element {
       <Card>
         <CardContent className="flex flex-wrap items-center justify-between gap-3 py-4">
           <p className="text-xs text-muted-foreground">
-            Open source under the MIT license. Source code and releases live on GitHub; the reference tool that
-            inspired Krestel is windows-defender-remover.
+            Open source under the MIT license. Source code, documentation and releases live on GitHub.
           </p>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void api.openExternal('https://github.com/ionuttbara/windows-defender-remover')}
-            >
-              <ExternalLink className="h-3.5 w-3.5" /> Reference project
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => void api.openExternal(GITHUB_URL)}>
-              <ExternalLink className="h-3.5 w-3.5" /> Krestel on GitHub
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" onClick={() => void api.openExternal(GITHUB_URL)}>
+            <ExternalLink className="h-3.5 w-3.5" /> Krestel on GitHub
+          </Button>
         </CardContent>
       </Card>
     </div>
