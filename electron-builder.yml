@@ -1,0 +1,25 @@
+appId: app.krestel.defender
+productName: Krestel
+copyright: MIT License
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!electron.vite.config.{js,ts,mjs,cjs}"
+  - "!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}"
+  - "!{.env,.env.*,.npmrc,pnpm-lock.yaml}"
+asarUnpack:
+  - resources/**
+extraResources:
+  - from: resources
+    to: resources
+win:
+  icon: build/icon.ico
+  # Inno Setup produces the final installer; electron-builder only packs win-unpacked
+  target:
+    - target: dir
+      arch:
+        - x64
