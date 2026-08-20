@@ -52,7 +52,8 @@ function main() {
   mkdirSync(path.join(root, 'dist', 'installer'), { recursive: true })
   run(iscc, [path.join('installer', 'krestel.iss')], { shell: false })
 
-  console.log('\nDone. Installer: dist\\installer\\Krestel-Setup-1.0.0.exe')
+  const version = require(path.join(root, 'package.json')).version
+  console.log(`\nDone. Installer: dist\\installer\\Krestel-Setup-${version}.exe`)
 }
 
 main()

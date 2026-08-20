@@ -108,7 +108,7 @@ const MOCK_BACKUPS: BackupInfo[] = [
 ]
 
 function mockPlan(mode: ActionMode, override?: Partial<PlanOptions>): Plan {
-  const stepCount = mode === 'remove' ? 14 : mode === 'restore' ? 8 : mode === 'disable' ? 6 : 4
+  const stepCount = mode === 'remove' ? 14 : mode === 'restore' ? 8 : mode === 'disable' ? 6 : mode === 'backup' ? 1 : 4
   const titles: Record<ActionMode, string[]> = {
     disable: ['Create system restore point', 'Apply disable policies', 'Disable Spynet / MAPS telemetry', 'Stop and disable antivirus services', 'Stop and disable Windows Security Health service', 'Finish'],
     enable: ['Remove disable policies', 'Re-enable services', 'Restore Security Health tray autostart', 'Start services'],
@@ -119,7 +119,8 @@ function mockPlan(mode: ActionMode, override?: Partial<PlanOptions>): Plan {
       'Delete kernel drivers', 'Delete driver registry keys', 'Delete Defender configuration registry',
       'Take ownership of program files', 'Delete program files'
     ],
-    restore: ['Remove disable policies', 'Import registry backups', 'Re-register scheduled tasks', 'Recreate missing services', 'Reset service startup types', 'Re-register Windows Security app', 'Restore Security Health tray autostart', 'Start services']
+    restore: ['Remove disable policies', 'Import registry backups', 'Re-register scheduled tasks', 'Recreate missing services', 'Reset service startup types', 'Re-register Windows Security app', 'Restore Security Health tray autostart', 'Start services'],
+    backup: ['Back up services, tasks and registry']
   }
   return {
     id: `mock-${Date.now()}`,
@@ -130,13 +131,14 @@ function mockPlan(mode: ActionMode, override?: Partial<PlanOptions>): Plan {
       disable: 'Disables real-time protection, services and telemetry via policy - fully reversible with Enable.',
       enable: 'Removes policy overrides, re-enables and starts Defender services.',
       remove: 'Permanently removes the selected Defender components. A backup is written first when enabled.',
-      restore: 'Restores Defender from a backup (registry, tasks, services) and re-enables protection.'
+      restore: 'Restores Defender from a backup (registry, tasks, services) and re-enables protection.',
+      backup: 'Creates a full backup right now: registry exports, service/driver manifests and scheduled task XML. Nothing on the system is changed.'
     }[mode],
     steps: titles[mode].slice(0, stepCount).map((title, i) => ({
       id: `s${i}`,
       title,
       detail: 'Demo-mode step - in the desktop app this describes the exact commands to run.',
-      risk: mode === 'remove' && i >= 7 ? 'destructive' : i === 0 ? 'safe' : 'moderate',
+      risk: mode === 'remove' && i >= 7 ? 'destructive' : i === 0 || mode === 'backup' ? 'safe' : 'moderate',
       group: 'common'
     })),
     options: { restorePoint: true, backup: true, dryRun: override?.dryRun ?? false, repairSystem: false, ...override }
@@ -148,12 +150,13 @@ function createMockApi(): KrestelApi {
   const listeners = new Set<(e: RunEvent) => void>()
   let running = false
   let cancelled = false
+  let lastMode: ActionMode = 'disable'
 
   const emit = (e: RunEvent): void => listeners.forEach((l) => l(e))
 
   return {
     platform: 'electron',
-    appVersion: '1.0.0 (demo)',
+    appVersion: '1.1.0 (demo)',
     isAdmin: async () => true,
     relaunchElevated: async () => true,
     getStatus: async () => {
@@ -166,6 +169,7 @@ function createMockApi(): KrestelApi {
     },
     buildPlan: async (mode, override) => {
       await delay(250)
+      lastMode = mode
       return mockPlan(mode, override)
     },
     runPlan: async (planId) => {
@@ -174,7 +178,7 @@ function createMockApi(): KrestelApi {
       cancelled = false
       emit({ type: 'run-start', planId, ts: Date.now() })
       void (async () => {
-        const plan = mockPlan('remove')
+        const plan = mockPlan(lastMode)
         for (const step of plan.steps) {
           if (cancelled) break
           emit({ type: 'step-start', planId, stepId: step.id, ts: Date.now() })

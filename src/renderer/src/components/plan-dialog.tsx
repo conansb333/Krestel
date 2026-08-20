@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Circle,
+  HardDriveDownload,
   Loader2,
   Rocket,
   ScrollText,
@@ -34,7 +35,8 @@ const MODE_LABEL: Record<ActionMode, string> = {
   disable: 'Disable Windows Defender',
   enable: 'Enable Windows Defender',
   remove: 'Remove Windows Defender',
-  restore: 'Restore Windows Defender'
+  restore: 'Restore Windows Defender',
+  backup: 'Create a backup now'
 }
 
 interface PlanDialogProps {
@@ -118,9 +120,9 @@ export function PlanDialog({ open, onOpenChange, mode, backupDir }: PlanDialogPr
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            {mode === 'remove' ? <ShieldAlert className="h-5 w-5 text-destructive" /> : <Rocket className="h-5 w-5 text-primary" />}
+            {mode === 'remove' ? <ShieldAlert className="h-5 w-5 text-destructive" /> : mode === 'backup' ? <HardDriveDownload className="h-5 w-5 text-emerald-500" /> : <Rocket className="h-5 w-5 text-primary" />}
             {MODE_LABEL[mode]}
-            <Badge variant={mode === 'remove' ? 'destructive' : mode === 'disable' ? 'warning' : mode === 'enable' ? 'success' : 'default'}>
+            <Badge variant={mode === 'remove' ? 'destructive' : mode === 'disable' ? 'warning' : mode === 'enable' || mode === 'backup' ? 'success' : 'default'}>
               {mode.toUpperCase()}
             </Badge>
           </DialogTitle>
@@ -279,7 +281,7 @@ export function PlanDialog({ open, onOpenChange, mode, backupDir }: PlanDialogPr
                 disabled={!canRun || building}
                 onClick={() => void handleRun()}
               >
-                {dryRun ? 'Start dry run' : mode === 'remove' ? 'Remove Defender' : `Run: ${mode}`}
+                {dryRun ? 'Start dry run' : mode === 'remove' ? 'Remove Defender' : mode === 'backup' ? 'Create backup' : `Run: ${mode}`}
               </Button>
             </>
           )}

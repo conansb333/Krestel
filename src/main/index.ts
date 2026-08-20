@@ -12,6 +12,23 @@ import { getStatus } from './lib/status'
 let mainWindow: BrowserWindow | null = null
 const executablePlans = new Map<string, ExecutablePlan>()
 
+const DEBUG_LOG = path.join(process.env.TEMP ?? process.cwd(), 'krestel-startup.log')
+function crumb(msg: string): void {
+  try {
+    require('node:fs').appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`)
+  } catch {
+    /* best effort */
+  }
+}
+crumb(`--- main loaded, packaged=${app.isPackaged}, argv=${JSON.stringify(process.argv)}`)
+
+// Keep dev instances away from the packaged app's userData. Windows paths are
+// case-insensitive, so without this a dev electron ("krestel") and the packaged
+// app ("Krestel") share one Chromium singleton lock and silently block each other.
+if (!app.isPackaged) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'Krestel-Dev'))
+}
+
 function sendEvent(event: Record<string, unknown>): void {
   mainWindow?.webContents.send('plan:event', event)
 }
@@ -34,25 +51,41 @@ function createWindow(): void {
       nodeIntegration: false
     }
   })
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('ready-to-show', () => {
+    crumb('window ready-to-show')
+    mainWindow?.show()
+  })
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+  mainWindow.on('closed', () => {
+    crumb('window closed')
+    mainWindow = null
+  })
 
   const devUrl = process.env['ELECTRON_RENDERER_URL']
   if (!app.isPackaged && devUrl) {
     mainWindow.loadURL(devUrl)
   } else {
+    crumb(`loading renderer file: ${path.join(__dirname, '../renderer/index.html')}`)
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
   }
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    crumb(`did-fail-load ${code} ${desc} ${url}`)
+  })
 }
 
 app.whenReady().then(() => {
+  crumb('app ready')
   const gotLock = app.requestSingleInstanceLock()
+  crumb(`single-instance lock: ${gotLock}`)
   if (!gotLock) {
+    crumb('QUIT: no single-instance lock')
     app.quit()
     return
   }
-  app.on('second-instance', () => {
+  crumb('registering IPC handlers')
+  app.on('second-instance', (_e, argv) => {
+    crumb(`second-instance: ${JSON.stringify(argv)}`)
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
@@ -61,7 +94,10 @@ app.whenReady().then(() => {
 
   ipcMain.handle('app:version', () => app.getVersion())
   ipcMain.handle('sys:isAdmin', () => isAdmin())
-  ipcMain.handle('sys:relaunchElevated', () => relaunchElevated())
+  ipcMain.handle('sys:relaunchElevated', () => {
+    crumb('IPC sys:relaunchElevated CALLED')
+    return relaunchElevated()
+  })
   ipcMain.handle('sys:status', () => getStatus())
   ipcMain.handle('settings:get', () => loadSettings())
   ipcMain.handle('settings:set', (_e, settings) => saveSettings(settings))
@@ -116,5 +152,9 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  crumb('window-all-closed -> quit')
   app.quit()
+})
+app.on('before-quit', () => {
+  crumb('before-quit')
 })
