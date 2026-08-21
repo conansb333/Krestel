@@ -3,7 +3,7 @@
 ; Expects dist\win-unpacked\ (produced by "npm run dist:dir") next to this repo root.
 
 #define MyAppName "Krestel"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "Krestel contributors"
 #define MyAppExeName "Krestel.exe"
 #define MyAppId "{{30C16215-C348-4C97-B696-4EC63F6B7A02}"

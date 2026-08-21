@@ -75,7 +75,7 @@ export function buildScript(ex: ExecutablePlan): string {
 async function execute(ex: ExecutablePlan, emit: EmitFn): Promise<void> {
   const run = new ActiveRun()
   active = run
-  const scriptPath = path.join(app.getPath('temp'), `defender-toolkit-${ex.plan.id}.ps1`)
+  const scriptPath = path.join(app.getPath('temp'), `krestel-plan-${ex.plan.id}.ps1`)
   const script = '\ufeff' + buildScript(ex)
 
   const finish = (type: RunEventType, message?: string) => {

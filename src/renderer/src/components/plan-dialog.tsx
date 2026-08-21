@@ -30,6 +30,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 const MODE_LABEL: Record<ActionMode, string> = {
   disable: 'Disable Windows Defender',
@@ -103,6 +104,11 @@ export function PlanDialog({ open, onOpenChange, mode, backupDir }: PlanDialogPr
   const doneCount = useMemo(() => {
     if (!activeRun) return 0
     return Object.values(activeRun.steps).filter((s) => s === 'done' || s === 'error').length
+  }, [activeRun])
+
+  const failedCount = useMemo(() => {
+    if (!activeRun) return 0
+    return Object.values(activeRun.steps).filter((s) => s === 'error').length
   }, [activeRun])
 
   const recentLogs = useMemo(() => logs.slice(-120).map((l) => l.text), [logs])
@@ -221,9 +227,9 @@ export function PlanDialog({ open, onOpenChange, mode, backupDir }: PlanDialogPr
           <div className="flex-1 min-h-0 space-y-4">
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <span className="font-medium">
+                <span className={cn('font-medium', failedCount > 0 && 'text-destructive')}>
                   {activeRun.status === 'running' && 'Executing...'}
-                  {activeRun.status === 'done' && 'Completed'}
+                  {activeRun.status === 'done' && (failedCount > 0 ? `Completed with ${failedCount} failed step${failedCount === 1 ? '' : 's'}` : 'Completed')}
                   {activeRun.status === 'cancelled' && 'Cancelled'}
                   {activeRun.status === 'error' && `Failed${activeRun.error ? ` - ${activeRun.error}` : ''}`}
                 </span>
@@ -238,12 +244,19 @@ export function PlanDialog({ open, onOpenChange, mode, backupDir }: PlanDialogPr
                 {plan.steps.map((step) => {
                   const state = activeRun.steps[step.id] ?? 'pending'
                   return (
-                    <div key={step.id} className="flex items-center gap-2 text-sm">
-                      {state === 'pending' && <Circle className="h-3.5 w-3.5 text-muted-foreground" />}
-                      {state === 'running' && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
-                      {state === 'done' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
-                      {state === 'error' && <XCircle className="h-3.5 w-3.5 text-destructive" />}
-                      <span className={state === 'pending' ? 'text-muted-foreground' : ''}>{step.title}</span>
+                    <div key={step.id} className="text-sm">
+                      <div className="flex items-center gap-2">
+                        {state === 'pending' && <Circle className="h-3.5 w-3.5 text-muted-foreground" />}
+                        {state === 'running' && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+                        {state === 'done' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
+                        {state === 'error' && <XCircle className="h-3.5 w-3.5 text-destructive" />}
+                        <span className={state === 'pending' ? 'text-muted-foreground' : ''}>{step.title}</span>
+                      </div>
+                      {state === 'error' && activeRun.errors[step.id] && (
+                        <p className="mt-1 ml-5 break-words text-xs leading-relaxed text-destructive">
+                          {activeRun.errors[step.id]}
+                        </p>
+                      )}
                     </div>
                   )
                 })}

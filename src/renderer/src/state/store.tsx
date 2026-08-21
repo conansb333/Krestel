@@ -23,6 +23,7 @@ export type StepState = 'pending' | 'running' | 'done' | 'error'
 export interface RunState {
   plan: Plan
   steps: Record<string, StepState>
+  errors: Record<string, string>
   status: 'running' | 'done' | 'cancelled' | 'error'
   startedAt: number
   endedAt?: number
@@ -102,7 +103,7 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
       }
       const steps: Record<string, StepState> = {}
       for (const s of plan.steps) steps[s.id] = 'pending'
-      const next: RunState = { plan, steps, status: 'running', startedAt: Date.now() }
+      const next: RunState = { plan, steps, errors: {}, status: 'running', startedAt: Date.now() }
       runRef.current = next
       setRun(next)
       appendLogs([
@@ -137,10 +138,13 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
         const stepId = event.stepId ?? ''
         const current = runRef.current
         if (current && event.planId === current.plan.id) {
-          const next: RunState = { ...current, steps: { ...current.steps } }
+          const next: RunState = { ...current, steps: { ...current.steps }, errors: { ...current.errors } }
           if (event.type === 'step-start') next.steps[stepId] = 'running'
           else if (event.type === 'step-done') next.steps[stepId] = 'done'
-          else next.steps[stepId] = 'error'
+          else {
+            next.steps[stepId] = 'error'
+            next.errors[stepId] = event.message ?? 'unknown error'
+          }
           runRef.current = next
           setRun(next)
         }
@@ -155,6 +159,7 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
       if (event.type === 'run-start') return
       if (event.type === 'run-done' || event.type === 'run-cancelled' || event.type === 'run-error') {
         const current = runRef.current
+        const failedSteps = current ? Object.values(current.steps).filter((s) => s === 'error').length : 0
         if (current) {
           const next: RunState = {
             ...current,
@@ -165,9 +170,16 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
           runRef.current = next
           setRun(next)
         }
-        const label = event.type === 'run-done' ? 'completed' : event.type === 'run-cancelled' ? 'cancelled' : `failed: ${event.message ?? 'unknown error'}`
+        const suffix = event.type === 'run-done' && failedSteps > 0 ? ` (${failedSteps} step${failedSteps === 1 ? '' : 's'} FAILED - check the log)` : ''
+        const label = event.type === 'run-done' ? `completed${suffix}` : event.type === 'run-cancelled' ? 'cancelled' : `failed: ${event.message ?? 'unknown error'}`
         appendLogs([{ ts: event.ts, kind: event.type === 'run-error' ? 'error' : 'system', text: `── Action ${label} ──` }])
-        if (event.type === 'run-done') toast.success('Action completed. A reboot may be required.')
+        if (event.type === 'run-done') {
+          if (failedSteps > 0) {
+            toast.warning(`Completed with ${failedSteps} failed step${failedSteps === 1 ? '' : 's'} - open the log for details.`)
+          } else {
+            toast.success('Action completed. A reboot may be required.')
+          }
+        }
         if (event.type === 'run-error') toast.error(`Action failed: ${event.message ?? 'unknown error'}`)
         void refreshStatus()
         void refreshBackups()
