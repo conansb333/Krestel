@@ -16,7 +16,7 @@ export function HelpPage(): React.JSX.Element {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Help & Safety</h1>
         <p className="text-sm text-muted-foreground">
-          Krestel v{version || '1.0.0'}
+          Krestel v{version || '...'}
           {demo && <Badge variant="warning" className="ml-2">DEMO MODE - no real system changes</Badge>}
         </p>
       </div>

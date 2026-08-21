@@ -195,7 +195,7 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
       setAdmin(isAdmin)
       setSettings(appSettings)
       try {
-        setVersion(await Promise.resolve(api.appVersion))
+        setVersion(await api.appVersion())
       } catch {
         setVersion('')
       }

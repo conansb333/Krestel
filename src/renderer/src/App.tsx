@@ -68,7 +68,7 @@ function AppShell(): React.JSX.Element {
           </div>
           <div>
             <p className="text-sm font-semibold leading-tight">Krestel</p>
-            <p className="text-[11px] text-muted-foreground">v{version || '1.0.0'}</p>
+            <p className="text-[11px] text-muted-foreground">v{version || '...'}</p>
           </div>
         </div>
         {demo && (
