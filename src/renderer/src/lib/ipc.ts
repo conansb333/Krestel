@@ -156,7 +156,7 @@ function createMockApi(): KrestelApi {
 
   return {
     platform: 'electron',
-    appVersion: '1.1.0 (demo)',
+    appVersion: async () => '1.1.2 (demo)',
     isAdmin: async () => true,
     relaunchElevated: async () => true,
     getStatus: async () => {

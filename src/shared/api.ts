@@ -3,7 +3,7 @@ import type { ActionMode, AppSettings, BackupInfo, DefenderStatus, Plan, PlanOpt
 /** Bridge surface exposed to the renderer via contextBridge. */
 export interface KrestelApi {
   platform: 'electron'
-  appVersion: string
+  appVersion(): Promise<string>
   isAdmin(): Promise<boolean>
   relaunchElevated(): Promise<boolean>
   getStatus(): Promise<DefenderStatus>

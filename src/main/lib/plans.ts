@@ -35,6 +35,8 @@ function pushStep(
 
 const POLICY_ROOT = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows Defender'
 
+const TP_HINT = 'Tamper Protection is likely ON - turn it off in Windows Security (Virus & threat protection > Manage settings), then run this action again.'
+
 const disablePoliciesPs = (): string[] => [
   `$root = '${POLICY_ROOT}'`,
   'New-Item -Path $root -Force | Out-Null',
@@ -47,7 +49,9 @@ const disablePoliciesPs = (): string[] => [
   'Set-ItemProperty -Path $rtp -Name DisableIOAVProtection -Value 1 -Type DWord',
   'Set-ItemProperty -Path $rtp -Name DisableScriptScanning -Value 1 -Type DWord',
   'Set-ItemProperty -Path $rtp -Name DisableScanOnRealtimeEnable -Value 1 -Type DWord',
-  'Log "Group policy keys set (DisableAntiSpyware / DisableAntiVirus / RTP overrides)."'
+  '$check = (Get-ItemProperty -Path $root -Name DisableAntiSpyware -ErrorAction SilentlyContinue).DisableAntiSpyware',
+  'if ($check -ne 1) { throw ("Policy keys were NOT applied - the write was blocked (access denied). ' + TP_HINT + '") }',
+  'Log "Group policy keys set and verified (DisableAntiSpyware / DisableAntiVirus / RTP overrides)."'
 ]
 
 const disableSpynetPs = (): string[] => [
@@ -56,6 +60,8 @@ const disableSpynetPs = (): string[] => [
   'Set-ItemProperty -Path $sp -Name SpynetReporting -Value 0 -Type DWord',
   'Set-ItemProperty -Path $sp -Name SubmitSamplesConsent -Value 2 -Type DWord',
   'Set-ItemProperty -Path $sp -Name DisableBlockAtFirstSeen -Value 1 -Type DWord',
+  '$check = (Get-ItemProperty -Path $sp -Name SpynetReporting -ErrorAction SilentlyContinue).SpynetReporting',
+  'if ($check -ne 0) { throw ("Spynet policy was NOT applied - the write was blocked (access denied). ' + TP_HINT + '") }',
   'Log "MAPS/SpyNet reporting disabled; sample submission set to never."'
 ]
 
@@ -64,7 +70,16 @@ const disableSmartScreenPs = (): string[] => [
   'New-Item -Path $ss -Force | Out-Null',
   'Set-ItemProperty -Path $ss -Name EnableSmartScreen -Value 0 -Type DWord',
   "Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer' -Name SmartScreenEnabled -Value 'Off'",
+  '$check = (Get-ItemProperty -Path $ss -Name EnableSmartScreen -ErrorAction SilentlyContinue).EnableSmartScreen',
+  'if ($check -ne 0) { throw ("SmartScreen policy was NOT applied - the write was blocked (access denied).") }',
   'Log "SmartScreen policy set to Off."'
+]
+
+const tamperCheckPs = (): string[] => [
+  "$tp = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows Defender\\Features' -ErrorAction SilentlyContinue).TamperProtection",
+  'if ($null -eq $tp) { Log "TamperProtection value not readable (usually means it is ON or Defender already removed)." }',
+  'else { Log ("TamperProtection raw value = " + $tp + " (4/5 = ON, 0/1 = OFF)") }',
+  'if ($tp -ge 4) { throw ("Tamper Protection is ON - Windows will block most of these changes. Turn it off in Windows Security (Virus & threat protection > Manage settings > Tamper Protection) and run again.") }'
 ]
 
 const stopAndDisablePs = (names: string[]): string[] => {
@@ -74,12 +89,18 @@ const stopAndDisablePs = (names: string[]): string[] => {
     '  $svc = Get-Service -Name $s -ErrorAction SilentlyContinue',
     '  if ($svc) {',
     '    Log ("Stopping service " + $s)',
-    '    sc.exe stop $s | Out-Null',
+    '    sc.exe stop $s 2>&1 | Out-Null',
     '    Log ("Disabling service " + $s)',
-    '    sc.exe config $s start= disabled | Out-Null',
-    '    Log ("  exit code: " + $LASTEXITCODE + " (5=access denied -> disable Tamper Protection first)")',
+    '    sc.exe config $s start= disabled 2>&1 | Out-Null',
     '  } else { Log ("Service " + $s + " not present (already removed?)") }',
-    '}'
+    '}',
+    'foreach ($s in ' + list + ') {',
+    '  $svc = Get-Service -Name $s -ErrorAction SilentlyContinue',
+    '  if ($svc -and $svc.StartType -ne [System.ServiceProcess.ServiceStartMode]::Disabled) {',
+    '    throw ("Service " + $s + " could NOT be disabled - the change was blocked. ' + TP_HINT + '")',
+    '  }',
+    '}',
+    'Log "Services stopped and verified as disabled."'
   ]
 }
 
@@ -161,6 +182,15 @@ function buildDisableSteps(settings: AppSettings, steps: StepDef[], options: Pla
   }
   pushStep(
     steps,
+    'chk',
+    'Check Tamper Protection',
+    'Fails fast with instructions if Tamper Protection is on - Windows would block the rest of the plan otherwise.',
+    'safe',
+    'common',
+    tamperCheckPs()
+  )
+  pushStep(
+    steps,
     'pol',
     'Apply disable policies',
     'Sets DisableAntiSpyware / DisableAntiVirus and real-time protection override policy keys.',
@@ -208,11 +238,14 @@ function buildDisableSteps(settings: AppSettings, steps: StepDef[], options: Pla
       'moderate',
       'securityHealth',
       [
-        'sc.exe stop SecurityHealthService | Out-Null',
-        'sc.exe config SecurityHealthService start= disabled | Out-Null',
-        'Log ("SecurityHealthService exit code: " + $LASTEXITCODE)',
+        'sc.exe stop SecurityHealthService 2>&1 | Out-Null',
+        'sc.exe config SecurityHealthService start= disabled 2>&1 | Out-Null',
         'Stop-Process -Name SecurityHealthSystray -Force -ErrorAction SilentlyContinue',
         "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -Name SecurityHealth -ErrorAction SilentlyContinue",
+        '$shs = Get-Service -Name SecurityHealthService -ErrorAction SilentlyContinue',
+        'if ($shs -and $shs.StartType -ne [System.ServiceProcess.ServiceStartMode]::Disabled) {',
+        '  throw ("SecurityHealthService could NOT be disabled - the change was blocked (access denied). ' + TP_HINT + '")',
+        '}',
         'Log "Security Health service disabled and tray entry removed."'
       ]
     )
@@ -310,6 +343,7 @@ function backupStepPs(backupDir: string, mode: string): string[] {
     "  Export-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath | Set-Content (Join-Path $dir ('task-' + $safe + '.xml')) -Encoding Unicode",
     '}',
     `@{ createdAt = (Get-Date).ToString("o"); app = "Krestel"; mode = ${psq(mode)} } | ConvertTo-Json | Set-Content (Join-Path $dir "manifest.json") -Encoding UTF8`,
+    'if (-not (Test-Path (Join-Path $dir "manifest.json"))) { throw "Backup failed - manifest.json was not written" }',
     'Log ("Backup written to " + $dir)'
   ]
 }
@@ -324,15 +358,11 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
   pushStep(
     steps,
     'chk',
-    'Report Tamper Protection state',
-    'Reads the raw TamperProtection value; if it stays on, later steps fail with access denied.',
+    'Check Tamper Protection',
+    'Fails fast with instructions if Tamper Protection is on - Windows would block the rest of the plan otherwise.',
     'safe',
     'common',
-    [
-      "$tp = (Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows Defender\\Features' -ErrorAction SilentlyContinue).TamperProtection",
-      'if ($null -eq $tp) { Log "TamperProtection value not readable (usually means it is ON or Defender already removed)." }',
-      'else { Log ("TamperProtection raw value = " + $tp + " (4/5 = ON, 0/1 = OFF)") }'
-    ]
+    tamperCheckPs()
   )
 
   pushStep(steps, 'pol', 'Apply disable policies first', 'Same policy set as Disable mode, as a pre-step.', 'moderate', 'common', disablePoliciesPs())

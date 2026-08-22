@@ -3,7 +3,7 @@ import type { RunEvent } from '../shared/types'
 
 const api = {
   platform: 'electron' as const,
-  appVersion: '',
+  appVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
   isAdmin: (): Promise<boolean> => ipcRenderer.invoke('sys:isAdmin'),
   relaunchElevated: (): Promise<boolean> => ipcRenderer.invoke('sys:relaunchElevated'),
   getStatus: () => ipcRenderer.invoke('sys:status'),
@@ -23,9 +23,5 @@ const api = {
   exportLogs: (text: string) => ipcRenderer.invoke('logs:export', text),
   openExternal: (url: string) => ipcRenderer.invoke('open:external', url)
 }
-
-ipcRenderer.invoke('app:version').then((v: string) => {
-  api.appVersion = v
-})
 
 contextBridge.exposeInMainWorld('krestel', api)
