@@ -1,8 +1,9 @@
 import { promises as fs } from 'node:fs'
+import { spawn as spawnChild } from 'node:child_process'
 import path from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import type { ActionMode, PlanOptions } from '../shared/types'
-import { isAdmin, relaunchElevated } from './lib/admin'
+import { buildElevationScript, isAdmin, relaunchElevated, RELAUNCH_ARG_PREFIX } from './lib/admin'
 import { deleteBackup, listBackups, openBackupsFolder } from './lib/backups'
 import { buildExecutablePlan, type ExecutablePlan } from './lib/plans'
 import { cancelRun, executePlan, isRunning } from './lib/runner'
@@ -20,7 +21,7 @@ function crumb(msg: string): void {
     /* best effort */
   }
 }
-crumb(`--- main loaded, packaged=${app.isPackaged}, argv=${JSON.stringify(process.argv)}`)
+crumb(`--- main loaded, packaged=${app.isPackaged}, argv=${JSON.stringify(process.argv)}, krestel-env=${JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([k]) => k.includes('KRESTEL'))))}`)
 
 // Keep dev instances away from the packaged app's userData. Windows paths are
 // case-insensitive, so without this a dev electron ("krestel") and the packaged
@@ -74,10 +75,26 @@ function createWindow(): void {
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   crumb('app ready')
-  const gotLock = app.requestSingleInstanceLock()
+  let gotLock = app.requestSingleInstanceLock()
   crumb(`single-instance lock: ${gotLock}`)
+  if (!gotLock && process.argv.some((a) => a.startsWith(RELAUNCH_ARG_PREFIX))) {
+    // Elevation handover: a previous instance launched us and is quitting now.
+    // Poll until its lock is released, then take over (verified in test/locktest.cjs).
+    crumb('relauncher mode: waiting for the previous instance to exit')
+    const deadline = Date.now() + 30_000
+    while (!gotLock && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      gotLock = app.requestSingleInstanceLock()
+    }
+    if (!gotLock) {
+      crumb('QUIT: relauncher timed out waiting for the lock')
+      app.quit()
+      return
+    }
+    crumb('relauncher acquired the lock')
+  }
   if (!gotLock) {
     crumb('QUIT: no single-instance lock')
     app.quit()
@@ -86,6 +103,11 @@ app.whenReady().then(() => {
   crumb('registering IPC handlers')
   app.on('second-instance', (_e, argv) => {
     crumb(`second-instance: ${JSON.stringify(argv)}`)
+    if (argv.some((a) => a.startsWith(RELAUNCH_ARG_PREFIX))) {
+      // the elevated/relaunched replacement is up - hand over and exit
+      app.quit()
+      return
+    }
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
@@ -98,6 +120,27 @@ app.whenReady().then(() => {
     crumb('IPC sys:relaunchElevated CALLED')
     return relaunchElevated()
   })
+  // automated test hook: KRESTEL_TEST_ELEVATE=1 triggers the elevation flow 2s after start
+  if (process.env.KRESTEL_TEST_ELEVATE === '1') {
+    setTimeout(() => {
+      crumb('test hook: calling relaunchElevated')
+      relaunchElevated()
+    }, 2000)
+  }
+  // diagnostic twin: same helper mechanics (harmless target, no RunAs) with
+  // piped stdio, to expose why silent spawns die in the packaged app
+  if (process.env.KRESTEL_TEST_TWIN === '1') {
+    setTimeout(() => {
+      const twinBuilt = buildElevationScript('C:\\Windows\\System32\\wusa.exe', process.pid)
+      const twinArgs = twinBuilt.args.slice(0, 5).concat([twinBuilt.script.replaceAll(' -Verb RunAs', '')])
+      const twin = spawnChild(twinBuilt.psExe, twinArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+      twin.stdout?.on('data', (d: Buffer) => crumb(`twin stdout: ${String(d).slice(0, 300)}`))
+      twin.stderr?.on('data', (d: Buffer) => crumb(`twin stderr: ${String(d).slice(0, 300)}`))
+      twin.on('error', (e: Error) => crumb(`twin error: ${String(e)}`))
+      twin.on('close', (c: number | null) => crumb(`twin exited: ${c}`))
+      crumb('twin spawned')
+    }, 2000)
+  }
   ipcMain.handle('sys:status', () => getStatus())
   ipcMain.handle('settings:get', () => loadSettings())
   ipcMain.handle('settings:set', (_e, settings) => saveSettings(settings))

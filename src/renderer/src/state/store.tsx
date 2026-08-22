@@ -210,7 +210,7 @@ export function StoreProvider({ children }: { children: ReactNode }): React.JSX.
       {
         ts: Date.now(),
         kind: 'system',
-        text: 'Restarting elevated: this window closes, then Windows shows a UAC prompt. If you decline it, the app restarts normally instead.'
+        text: 'Windows will show a UAC prompt. Accept it to restart elevated, or decline to restart normally - this window stays open until the new one takes over.'
       }
     ])
     await api.relaunchElevated()
