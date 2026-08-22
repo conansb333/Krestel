@@ -38,30 +38,55 @@ const POLICY_ROOT = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows Defender'
 const TP_HINT =
   'Windows blocked the change - either Tamper Protection is ON (turn it off in Windows Security > Virus & threat protection > Manage settings) or the service is protected by Windows (PPL); registry-based changes apply after a reboot.'
 
+/** PS function that takes ownership of an HKLM registry key and grants
+ *  Administrators full control - needed because protected Defender service
+ *  keys deny value writes and deletions even to admins. */
+const regOwnershipFnPs = (): string[] => [
+  'function Take-RegKey([string]$subkey) {',
+  '  $admins = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")',
+  '  $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subkey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)',
+  '  $sec = $rk.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Owner)',
+  '  $sec.SetOwner($admins)',
+  '  $rk.SetAccessControl($sec)',
+  '  $rk.Close()',
+  '  $rk2 = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subkey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)',
+  '  $sec2 = $rk2.GetAccessControl()',
+  '  $rule = New-Object System.Security.AccessControl.RegistryAccessRule($admins, "FullControl", "ContainerInherit", "None", "Allow")',
+  '  $sec2.SetAccessRule($rule)',
+  '  $rk2.SetAccessControl($sec2)',
+  '  $rk2.Close()',
+  '}'
+]
+
 /** Disables services via their registry Start value. sc.exe config/delete is
  *  blocked by Windows even for admins on protected (PPL) Defender services,
- *  while registry edits are not - this is the reliable route. */
-const setServiceStartPs = (names: string[], startValue: number, label: string): string[] => {
-  const list = names.map((n) => `'${n}'`).join(', ')
-  return [
-    `foreach ($s in ${list}) {`,
-    "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
-    '  if (Test-Path $key) {',
-    '    try { sc.exe stop $s 2>&1 | Out-Null } catch { }',
-    `    Set-ItemProperty -Path $key -Name Start -Value ${startValue} -Type DWord -ErrorAction Stop`,
-    `    Log ("${label} via registry (Start=${startValue}): " + $s)`,
-    '  } else { Log ("Service key not present (already removed?): " + $s) }',
-    '}',
-    `foreach ($s in ${list}) {`,
-    "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
-    '  if (Test-Path $key) {',
-    '    $start = (Get-ItemProperty -Path $key -Name Start -ErrorAction SilentlyContinue).Start',
-    `    if ($start -ne ${startValue}) { throw ("Service " + $s + " could NOT be ${label.toLowerCase()} - ${TP_HINT}") }`,
-    '  }',
-    '}',
-    `Log "Services ${label.toLowerCase()} via registry and verified."`
-  ]
-}
+ *  while registry edits are not - this is the reliable route. Falls back to a
+ *  registry-key ownership takeover if the write itself is ACL-blocked. */
+const setServiceStartPs = (names: string[], startValue: number, label: string): string[] => [
+  ...takeOwnershipPrelude(),
+  ...regOwnershipFnPs(),
+  `foreach ($s in ${names.map((n) => `'${n}'`).join(', ')}) {`,
+  "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
+  '  if (Test-Path $key) {',
+  '    try { sc.exe stop $s 2>&1 | Out-Null } catch { }',
+  `    try { Set-ItemProperty -Path $key -Name Start -Value ${startValue} -Type DWord -ErrorAction Stop }`,
+  '    catch {',
+  '      Log ("Direct write denied for " + $s + " - taking ownership of the service key")',
+  "      Take-RegKey ('SYSTEM\\CurrentControlSet\\Services\\' + $s)",
+  `      Set-ItemProperty -Path $key -Name Start -Value ${startValue} -Type DWord -ErrorAction Stop`,
+  '    }',
+  `    Log ("${label} via registry (Start=${startValue}): " + $s)`,
+  '  } else { Log ("Service key not present (already removed?): " + $s) }',
+  '}',
+  `foreach ($s in ${names.map((n) => `'${n}'`).join(', ')}) {`,
+  "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
+  '  if (Test-Path $key) {',
+  '    $start = (Get-ItemProperty -Path $key -Name Start -ErrorAction SilentlyContinue).Start',
+  `    if ($start -ne ${startValue}) { throw ("Service " + $s + " could NOT be ${label.toLowerCase()} - " + "${TP_HINT}") }`,
+  '  }',
+  '}',
+  `Log "Services ${label.toLowerCase()} via registry and verified."`
+]
 
 const disablePoliciesPs = (): string[] => [
   `$root = '${POLICY_ROOT}'`,
@@ -164,7 +189,12 @@ const takeOwnershipPs = (target: string): string[] => [
   '      $acl.SetOwner($admins)',
   '      $i.SetAccessControl($acl)',
   '      $acl = $i.GetAccessControl()',
-  '      $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($admins, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")',
+  '      if ($i.PSIsContainer) {',
+  '        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($admins, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")',
+  '      } else {',
+  '        # inheritance flags are invalid on files ("No flags can be set")',
+  '        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($admins, "FullControl", "None", "None", "Allow")',
+  '      }',
   '      $acl.AddAccessRule($rule)',
   '      $i.SetAccessControl($acl)',
   '      $count++',
@@ -480,11 +510,18 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       'destructive',
       'services',
       [
+        ...takeOwnershipPrelude(),
+        ...regOwnershipFnPs(),
         `foreach ($s in ${list}) {`,
         "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
         '  if (Test-Path $key) {',
         '    try { sc.exe delete $s 2>&1 | Out-Null } catch { }',
         '    Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    if (Test-Path $key) {',
+        '      Log ("Direct delete denied for " + $s + " - taking ownership of the service key")',
+        "      Take-RegKey ('SYSTEM\\CurrentControlSet\\Services\\' + $s)",
+        '      Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    }',
         '    if (Test-Path $key) { throw ("Could not delete service key " + $s + " - " + "' + TP_HINT + '") }',
         '    Log ("Deleted service (registry): " + $s)',
         '  } else { Log ("Service key already gone: " + $s) }',
@@ -496,30 +533,27 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
   if (c.drivers) {
     pushStep(
       steps,
-      'drv-del',
-      'Delete kernel drivers',
-      'Deletes WdFilter, WdBoot and WdNisDrv driver services.',
-      'destructive',
-      'drivers',
-      [
-        "foreach ($d in 'WdFilter','WdBoot','WdNisDrv') {",
-        '  sc.exe stop $d | Out-Null',
-        '  sc.exe delete $d | Out-Null',
-        '  Log ("Deleted driver " + $d + " (exit " + $LASTEXITCODE + ")")',
-        '}'
-      ]
-    )
-    pushStep(
-      steps,
       'drv-reg',
-      'Delete driver registry keys',
-      'Removes leftover driver service keys under HKLM\\SYSTEM\\CurrentControlSet\\Services.',
+      'Delete kernel driver services and keys',
+      'Deletes the WdFilter, WdBoot and WdNisDrv driver service keys (sc.exe is blocked on protected drivers; registry deletion applies after reboot).',
       'destructive',
       'drivers',
       [
-        "foreach ($k in 'WdFilter','WdBoot','WdNisDrv') {",
-        "  $p = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $k",
-        '  if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue; Log ("Deleted key " + $p) }',
+        ...takeOwnershipPrelude(),
+        ...regOwnershipFnPs(),
+        "foreach ($d in 'WdFilter','WdBoot','WdNisDrv') {",
+        "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $d",
+        '  if (Test-Path $key) {',
+        '    try { sc.exe stop $d 2>&1 | Out-Null } catch { }',
+        '    try { sc.exe delete $d 2>&1 | Out-Null } catch { }',
+        '    Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    if (Test-Path $key) {',
+        "      Take-RegKey ('SYSTEM\\CurrentControlSet\\Services\\' + $d)",
+        '      Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    }',
+        '    if (Test-Path $key) { Log ("WARNING: could not delete driver key " + $d + " - it will need a reboot or manual removal") }',
+        '    else { Log ("Deleted driver key: " + $d) }',
+        '  } else { Log ("Driver key already gone: " + $d) }',
         '}'
       ]
     )
@@ -535,10 +569,14 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       'services',
       [
         "foreach ($p in 'HKLM:\\SOFTWARE\\Microsoft\\Windows Defender', 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WdNisSvc') {",
-        '  if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue; Log ("Deleted key " + $p) }',
+        '  if (Test-Path $p) {',
+        '    Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue',
+        '    if (Test-Path $p) { Log ("WARNING: could not fully delete " + $p + " - it may be protected; the service-key step reports details") }',
+        '    else { Log ("Deleted key " + $p) }',
+        '  }',
         '}',
         "Remove-Item -Path '${POLICY_ROOT}' -Recurse -Force -ErrorAction SilentlyContinue",
-        'Log "Defender registry configuration removed."'
+        'Log "Defender registry configuration handled."'
       ]
     )
   }
@@ -673,7 +711,9 @@ function buildRestoreSteps(settings: AppSettings, steps: StepDef[], options: Pla
       'common',
       [
         `$dir = ${psq(dir)}`,
-        '$files = Get-ChildItem -Path $dir -Filter "*.reg" -ErrorAction Stop',
+        'if (-not (Test-Path -LiteralPath $dir)) { throw ("Backup folder not found: " + $dir) }',
+        '$files = @(Get-ChildItem -Path $dir -Filter "*.reg" -ErrorAction SilentlyContinue)',
+        'if ($files.Count -eq 0) { throw ("No .reg files found in " + $dir) }',
         'foreach ($f in $files) { reg.exe import $f.FullName 2>&1 | Out-Null; Log ("Imported " + $f.Name) }',
         'Log ("Imported " + $files.Count + " registry files.")'
       ]

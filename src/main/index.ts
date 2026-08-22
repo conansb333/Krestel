@@ -4,7 +4,7 @@ import path from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import type { ActionMode, PlanOptions } from '../shared/types'
 import { buildElevationScript, isAdmin, relaunchElevated, RELAUNCH_ARG_PREFIX } from './lib/admin'
-import { deleteBackup, listBackups, openBackupsFolder } from './lib/backups'
+import { backupsRoot, deleteBackup, listBackups, openBackupsFolder } from './lib/backups'
 import { buildExecutablePlan, type ExecutablePlan } from './lib/plans'
 import { cancelRun, executePlan, isRunning } from './lib/runner'
 import { loadSettings, saveSettings } from './lib/settings'
@@ -146,7 +146,17 @@ app.whenReady().then(async () => {
   ipcMain.handle('settings:set', (_e, settings) => saveSettings(settings))
   ipcMain.handle('plan:build', async (_e, mode: ActionMode, override: Partial<PlanOptions>) => {
     const settings = await loadSettings()
-    const executable = await buildExecutablePlan(settings, mode, override ?? {})
+    const resolved: Partial<PlanOptions> = { ...override }
+    // the Backups page passes the folder NAME - resolve it against the backups
+    // root so the restore steps receive an absolute path
+    if (resolved.backupDir && !path.isAbsolute(resolved.backupDir)) {
+      if (/^[\w.-]+$/.test(resolved.backupDir)) {
+        resolved.backupDir = path.join(backupsRoot(), resolved.backupDir)
+      } else {
+        resolved.backupDir = undefined
+      }
+    }
+    const executable = await buildExecutablePlan(settings, mode, resolved)
     executablePlans.set(executable.plan.id, executable)
     // keep the cache small
     if (executablePlans.size > 12) {
@@ -176,7 +186,7 @@ app.whenReady().then(async () => {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
     const result = await dialog.showSaveDialog(win, {
       title: 'Export log',
-      defaultPath: path.join(app.getPath('documents'), `defender-toolkit-log-${stamp}.txt`),
+      defaultPath: path.join(app.getPath('documents'), `krestel-log-${stamp}.txt`),
       filters: [{ name: 'Text', extensions: ['txt', 'log'] }]
     })
     if (result.canceled || !result.filePath) return { saved: false }

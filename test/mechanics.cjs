@@ -87,6 +87,28 @@ else { Set-ItemProperty $sm -Name PendingFileRenameOperations -Value $pfroBefore
 Start-Sleep 1
 Remove-Item -LiteralPath '${TD}' -Recurse -Force -ErrorAction SilentlyContinue
 RK ("CLEANUP-DIR-GONE=" + (-not (Test-Path '${TD}')))
+
+# --- 4) service key with hardened ACL: registry ownership fallback ----------
+$createOut = sc.exe create kresteltsvc3 binpath= 'C:\\Windows\\System32\\cmd.exe' start= demand 2>&1
+RK ("REG-ACL-CREATE-OUTPUT=" + (($createOut | Out-String) -replace "\\s+", " ").Trim())
+$k2 = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\kresteltsvc3'
+$admSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+$acl2 = Get-Acl $k2
+# mirror protected Defender service keys: admins may READ but not WRITE/DELETE
+$acl2.SetAccessRuleProtection($true, $true)
+$acl2.Access | Where-Object { $_.IdentityReference.Value -like '*Administrators*' } | ForEach-Object { [void]$acl2.RemoveAccessRule($_) }
+$readRule = New-Object System.Security.AccessControl.RegistryAccessRule($admSid, 'ReadKey', 'None', 'None', 'Allow')
+$acl2.AddAccessRule($readRule)
+Set-Acl -Path $k2 -AclObject $acl2
+$writeDenied = $false
+try { Set-ItemProperty -Path $k2 -Name Start -Value 3 -Type DWord -ErrorAction Stop } catch { $writeDenied = $true }
+RK ("REG-ACL-WRITE-DENIED-AS-EXPECTED=" + $writeDenied)
+${svcPs.join('\n').replaceAll("'WinDefend', 'WdNisSvc'", "'kresteltsvc3'")}
+$start2 = (Get-ItemProperty $k2 -Name Start -ErrorAction SilentlyContinue).Start
+RK ("REG-ACL-START-AFTER-STEP=" + $start2)
+Remove-Item -Path $k2 -Recurse -Force -ErrorAction SilentlyContinue
+RK ("REG-ACL-CLEANED=" + (-not (Test-Path $k2)))
+
 RK 'DONE'
 Set-Content -Path '${RF}' -Value ($out -join [Environment]::NewLine)
 `
