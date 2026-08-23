@@ -107,7 +107,7 @@ krestel/
 ├─ scripts/
 │  ├─ build-installer.cjs          # one-command builder: build -> pack -> ISCC
 │  ├─ test-install.cjs             # automated install/launch/uninstall test
-│  └─ make-icon.mjs                # regenerates build/icon.ico (shield + K)
+│  └─ make-icon.mjs                # regenerates build/icon.ico from the app logo
 └─ electron.vite.config.ts
 ```
 

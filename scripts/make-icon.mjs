@@ -1,100 +1,133 @@
-// Generates build/icon.ico (multi-size, BMP-embedded) and build/icon-256.png.
-// Pure Node - no image dependencies. Draws a rounded-square tile with a
-// vertical indigo->violet gradient and a bold white "K" monogram, using
-// signed-distance functions with 2x2 supersampling.
-import { deflateSync } from 'node:zlib'
-import { mkdirSync, writeFileSync } from 'node:fs'
+// Generates build/icon.ico (multi-size, BMP-embedded) and build/icon-256.png
+// from the app logo (src/renderer/src/assets/logo.png). Pure Node - no image
+// dependencies. Decodes the RGBA PNG, area-average resamples it to each icon
+// size with premultiplied alpha, and packs rcedit-safe uncompressed BMP
+// entries into the ICO container.
+import { deflateSync, inflateSync } from 'node:zlib'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
+const SRC = join(root, 'src', 'renderer', 'src', 'assets', 'logo.png')
 
-// ---- drawing (normalized 0..1 coordinates, y down) -------------------------
-function roundedRectSdf(x, y) {
-  // tile occupies [0.06, 0.94] with corner radius 0.16
-  const cx = 0.5
-  const cy = 0.5
-  const half = 0.44
-  const r = 0.16
-  const qx = Math.abs(x - cx) - (half - r)
-  const qy = Math.abs(y - cy) - (half - r)
-  const ax = Math.max(qx, 0)
-  const ay = Math.max(qy, 0)
-  return Math.hypot(ax, ay) + Math.min(Math.max(qx, qy), 0) - r
-}
-
-function segDist(px, py, ax, ay, bx, by) {
-  const abx = bx - ax
-  const aby = by - ay
-  const t = Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / (abx * abx + aby * aby)))
-  const dx = px - (ax + t * abx)
-  const dy = py - (ay + t * aby)
-  return Math.hypot(dx, dy)
-}
-
-// bold "K" strokes
-const STROKE = 0.052
-function kSdf(x, y) {
-  const stem = segDist(x, y, 0.375, 0.245, 0.375, 0.755)
-  const up = segDist(x, y, 0.43, 0.52, 0.66, 0.225)
-  const down = segDist(x, y, 0.445, 0.545, 0.675, 0.78)
-  return Math.min(stem, up, down) - STROKE
-}
-
-function lerp(a, b, t) {
-  return a + (b - a) * t
-}
-
-const TOP = [99, 102, 241] // indigo #6366F1
-const BOTTOM = [124, 58, 237] // violet #7C3AED
-const WHITE = [255, 255, 255]
-
-function shade(px, py) {
-  const aa = 1.5 / 256
-  const d = roundedRectSdf(px, py)
-  if (d > aa * 3) return [0, 0, 0, 0]
-  if (d <= 0) {
-    let col = [lerp(TOP[0], BOTTOM[0], Math.min(1, (py - 0.06) / 0.88)), lerp(TOP[1], BOTTOM[1], Math.min(1, (py - 0.06) / 0.88)), lerp(TOP[2], BOTTOM[2], Math.min(1, (py - 0.06) / 0.88))]
-    // subtle lighter rim for polish
-    if (d > -0.018) col = col.map((c) => lerp(c, 255, 0.18))
-    const k = kSdf(px, py)
-    if (k < 0) col = WHITE
-    return [Math.round(col[0]), Math.round(col[1]), Math.round(col[2]), 255]
+// ---- PNG decoder (8-bit truecolor +/- alpha, non-interlaced) ------------------
+function decodePng(buf) {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  if (!buf.subarray(0, 8).equals(sig)) throw new Error('not a PNG file')
+  let pos = 8
+  let width = 0
+  let height = 0
+  let colorType = -1
+  let interlace = -1
+  const idat = []
+  while (pos < buf.length) {
+    const len = buf.readUInt32BE(pos)
+    const type = buf.toString('ascii', pos + 4, pos + 8)
+    const data = buf.subarray(pos + 8, pos + 8 + len)
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0)
+      height = data.readUInt32BE(4)
+      if (data[8] !== 8) throw new Error(`unsupported bit depth ${data[8]} (need 8)`)
+      colorType = data[9]
+      interlace = data[12]
+    } else if (type === 'IDAT') {
+      idat.push(data)
+    } else if (type === 'IEND') {
+      break
+    }
+    pos += 12 + len
   }
-  return [0, 0, 0, 0]
+  if (colorType !== 2 && colorType !== 6) throw new Error(`unsupported color type ${colorType} (need RGB/RGBA)`)
+  if (interlace !== 0) throw new Error('interlaced PNG not supported')
+
+  const bpp = colorType === 6 ? 4 : 3
+  const raw = inflateSync(Buffer.concat(idat))
+  const stride = width * bpp
+  const out = new Uint8Array(width * height * 4)
+  const prev = new Uint8Array(stride)
+  const line = new Uint8Array(stride)
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)]
+    for (let i = 0; i < stride; i++) line[i] = raw[y * (stride + 1) + 1 + i]
+    for (let i = 0; i < stride; i++) {
+      const left = i >= bpp ? line[i - bpp] : 0
+      const up = prev[i]
+      const ul = i >= bpp ? prev[i - bpp] : 0
+      switch (filter) {
+        case 0: break
+        case 1: line[i] = (line[i] + left) & 0xff; break
+        case 2: line[i] = (line[i] + up) & 0xff; break
+        case 3: line[i] = (line[i] + ((left + up) >> 1)) & 0xff; break
+        case 4: {
+          const p = left + up - ul
+          const pa = Math.abs(p - left)
+          const pb = Math.abs(p - up)
+          const pc = Math.abs(p - ul)
+          line[i] = (line[i] + (pa <= pb && pa <= pc ? left : pb <= pc ? up : ul)) & 0xff
+          break
+        }
+        default: throw new Error(`bad PNG filter ${filter}`)
+      }
+    }
+    for (let x = 0; x < width; x++) {
+      const s = x * bpp
+      const d = (y * width + x) * 4
+      out[d] = line[s]
+      out[d + 1] = line[s + 1]
+      out[d + 2] = line[s + 2]
+      out[d + 3] = bpp === 4 ? line[s + 3] : 255
+    }
+    prev.set(line)
+  }
+  return { width, height, rgba: out }
 }
 
-function renderRgba(size) {
-  const buf = new Uint8Array(size * size * 4)
-  const ss = 2
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
+// ---- area-average resampling (premultiplied alpha) ---------------------------
+function resample(src, sw, sh, tw, th) {
+  if (tw === sw && th === sh) return src
+  const out = new Uint8Array(tw * th * 4)
+  const sx = sw / tw
+  const sy = sh / th
+  for (let y = 0; y < th; y++) {
+    const fy0 = y * sy
+    const fy1 = fy0 + sy
+    for (let x = 0; x < tw; x++) {
+      const fx0 = x * sx
+      const fx1 = fx0 + sx
       let r = 0
       let g = 0
       let b = 0
       let a = 0
-      for (let sy = 0; sy < ss; sy++) {
-        for (let sx = 0; sx < ss; sx++) {
-          const u = (px + (sx + 0.5) / ss) / size
-          const v = (py + (sy + 0.5) / ss) / size
-          const c = shade(u, v)
-          r += c[0] * c[3]
-          g += c[1] * c[3]
-          b += c[2] * c[3]
-          a += c[3]
+      let area = 0
+      const iy0 = Math.floor(fy0)
+      const iy1 = Math.min(sh, Math.ceil(fy1))
+      const ix0 = Math.floor(fx0)
+      const ix1 = Math.min(sw, Math.ceil(fx1))
+      for (let yy = iy0; yy < iy1; yy++) {
+        const cy = Math.min(fy1, yy + 1) - Math.max(fy0, yy)
+        for (let xx = ix0; xx < ix1; xx++) {
+          const cx = Math.min(fx1, xx + 1) - Math.max(fx0, xx)
+          const wgt = cx * cy
+          const i = (yy * sw + xx) * 4
+          const al = src[i + 3] / 255
+          r += src[i] * al * wgt
+          g += src[i + 1] * al * wgt
+          b += src[i + 2] * al * wgt
+          a += src[i + 3] * wgt
+          area += wgt
         }
       }
-      const n = ss * ss
-      const i = (py * size + px) * 4
+      const d = (y * tw + x) * 4
       if (a > 0) {
-        buf[i] = Math.round(r / a)
-        buf[i + 1] = Math.round(g / a)
-        buf[i + 2] = Math.round(b / a)
-        buf[i + 3] = Math.round(a / n)
+        out[d] = Math.min(255, Math.round(r / (a / 255)))
+        out[d + 1] = Math.min(255, Math.round(g / (a / 255)))
+        out[d + 2] = Math.min(255, Math.round(b / (a / 255)))
       }
+      out[d + 3] = Math.round(a / area)
     }
   }
-  return buf
+  return out
 }
 
 // ---- PNG encoder -----------------------------------------------------------
@@ -193,12 +226,14 @@ function buildIco(entries) {
 
 // ---- main --------------------------------------------------------------------
 const SIZES = [16, 24, 32, 48, 64, 128, 256]
+const { width, height, rgba } = decodePng(readFileSync(SRC))
+if (width !== height) throw new Error(`logo must be square, got ${width}x${height}`)
 const rendered = new Map()
-for (const s of SIZES) rendered.set(s, renderRgba(s))
+for (const s of SIZES) rendered.set(s, resample(rgba, width, height, s, s))
 
 const ico = buildIco(SIZES.map((s) => ({ size: s, data: bmpEntry(rendered.get(s), s) })))
 mkdirSync(join(root, 'build'), { recursive: true })
 writeFileSync(join(root, 'build', 'icon.ico'), ico)
 writeFileSync(join(root, 'build', 'icon-256.png'), encodePng(rendered.get(256), 256))
 writeFileSync(join(root, 'build', 'icon-32.png'), encodePng(rendered.get(32), 32))
-console.log(`icon.ico (${(ico.length / 1024).toFixed(0)} KB, sizes: ${SIZES.join(',')}), icon-256.png, icon-32.png written to build/`)
+console.log(`icon.ico (${(ico.length / 1024).toFixed(0)} KB, sizes: ${SIZES.join(',')}), icon-256.png, icon-32.png written to build/ from ${SRC.slice(root.length + 1)}`)
