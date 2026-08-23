@@ -35,7 +35,58 @@ function pushStep(
 
 const POLICY_ROOT = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows Defender'
 
-const TP_HINT = 'Tamper Protection is likely ON - turn it off in Windows Security (Virus & threat protection > Manage settings), then run this action again.'
+const TP_HINT =
+  'Windows blocked the change - either Tamper Protection is ON (turn it off in Windows Security > Virus & threat protection > Manage settings) or the service is protected by Windows (PPL); registry-based changes apply after a reboot.'
+
+/** PS function that takes ownership of an HKLM registry key and grants
+ *  Administrators full control - needed because protected Defender service
+ *  keys deny value writes and deletions even to admins. */
+const regOwnershipFnPs = (): string[] => [
+  'function Take-RegKey([string]$subkey) {',
+  '  $admins = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")',
+  '  $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subkey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::TakeOwnership)',
+  '  $sec = $rk.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Owner)',
+  '  $sec.SetOwner($admins)',
+  '  $rk.SetAccessControl($sec)',
+  '  $rk.Close()',
+  '  $rk2 = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subkey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, [System.Security.AccessControl.RegistryRights]::ChangePermissions)',
+  '  $sec2 = $rk2.GetAccessControl()',
+  '  $rule = New-Object System.Security.AccessControl.RegistryAccessRule($admins, "FullControl", "ContainerInherit", "None", "Allow")',
+  '  $sec2.SetAccessRule($rule)',
+  '  $rk2.SetAccessControl($sec2)',
+  '  $rk2.Close()',
+  '}'
+]
+
+/** Disables services via their registry Start value. sc.exe config/delete is
+ *  blocked by Windows even for admins on protected (PPL) Defender services,
+ *  while registry edits are not - this is the reliable route. Falls back to a
+ *  registry-key ownership takeover if the write itself is ACL-blocked. */
+const setServiceStartPs = (names: string[], startValue: number, label: string): string[] => [
+  ...takeOwnershipPrelude(),
+  ...regOwnershipFnPs(),
+  `foreach ($s in ${names.map((n) => `'${n}'`).join(', ')}) {`,
+  "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
+  '  if (Test-Path $key) {',
+  '    try { sc.exe stop $s 2>&1 | Out-Null } catch { }',
+  `    try { Set-ItemProperty -Path $key -Name Start -Value ${startValue} -Type DWord -ErrorAction Stop }`,
+  '    catch {',
+  '      Log ("Direct write denied for " + $s + " - taking ownership of the service key")',
+  "      Take-RegKey ('SYSTEM\\CurrentControlSet\\Services\\' + $s)",
+  `      Set-ItemProperty -Path $key -Name Start -Value ${startValue} -Type DWord -ErrorAction Stop`,
+  '    }',
+  `    Log ("${label} via registry (Start=${startValue}): " + $s)`,
+  '  } else { Log ("Service key not present (already removed?): " + $s) }',
+  '}',
+  `foreach ($s in ${names.map((n) => `'${n}'`).join(', ')}) {`,
+  "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
+  '  if (Test-Path $key) {',
+  '    $start = (Get-ItemProperty -Path $key -Name Start -ErrorAction SilentlyContinue).Start',
+  `    if ($start -ne ${startValue}) { throw ("Service " + $s + " could NOT be ${label.toLowerCase()} - " + "${TP_HINT}") }`,
+  '  }',
+  '}',
+  `Log "Services ${label.toLowerCase()} via registry and verified."`
+]
 
 const disablePoliciesPs = (): string[] => [
   `$root = '${POLICY_ROOT}'`,
@@ -82,32 +133,15 @@ const tamperCheckPs = (): string[] => [
   'if ($tp -ge 4) { throw ("Tamper Protection is ON - Windows will block most of these changes. Turn it off in Windows Security (Virus & threat protection > Manage settings > Tamper Protection) and run again.") }'
 ]
 
-const stopAndDisablePs = (names: string[]): string[] => {
-  const list = names.map((n) => `'${n}'`).join(', ')
-  return [
-    `foreach ($s in ${list}) {`,
-    '  $svc = Get-Service -Name $s -ErrorAction SilentlyContinue',
-    '  if ($svc) {',
-    '    Log ("Stopping service " + $s)',
-    '    sc.exe stop $s 2>&1 | Out-Null',
-    '    Log ("Disabling service " + $s)',
-    '    sc.exe config $s start= disabled 2>&1 | Out-Null',
-    '  } else { Log ("Service " + $s + " not present (already removed?)") }',
-    '}',
-    'foreach ($s in ' + list + ') {',
-    '  $svc = Get-Service -Name $s -ErrorAction SilentlyContinue',
-    '  if ($svc -and $svc.StartType -ne [System.ServiceProcess.ServiceStartMode]::Disabled) {',
-    '    throw ("Service " + $s + " could NOT be disabled - the change was blocked. ' + TP_HINT + '")',
-    '  }',
-    '}',
-    'Log "Services stopped and verified as disabled."'
-  ]
-}
-
 const restorePointPs = (): string[] => [
   'Log "Creating system restore point..."',
-  "Checkpoint-Computer -RestorePointType 'MODIFY_SETTINGS' -Description 'Krestel: before Defender changes' -ErrorAction Stop | Out-Null",
-  'Log "Restore point created."'
+  'try {',
+  "  Checkpoint-Computer -RestorePointType 'MODIFY_SETTINGS' -Description 'Krestel: before Defender changes' -ErrorAction Stop | Out-Null",
+  '  Log "Restore point created."',
+  '} catch {',
+  '  Log ("Restore point NOT created: " + $_.Exception.Message)',
+  '  Log "System Restore appears to be disabled on this machine (common on VMs). Enable it with: Enable-ComputerRestore -Drive C:\\ - or continue without restore points; Krestel backups are unaffected."',
+  '}'
 ]
 
 const takeOwnershipPrelude = (): string[] => [
@@ -148,19 +182,59 @@ const takeOwnershipPs = (target: string): string[] => [
   '  $admins = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")',
   '  $items = @(Get-Item -LiteralPath $target -Force) + @(Get-ChildItem -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue)',
   '  $count = 0',
+  '  $firstErrors = @()',
   '  foreach ($i in $items) {',
   '    try {',
   '      $acl = $i.GetAccessControl()',
   '      $acl.SetOwner($admins)',
   '      $i.SetAccessControl($acl)',
   '      $acl = $i.GetAccessControl()',
-  '      $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($admins, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")',
+  '      if ($i.PSIsContainer) {',
+  '        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($admins, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")',
+  '      } else {',
+  '        # inheritance flags are invalid on files ("No flags can be set")',
+  '        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($admins, "FullControl", "None", "None", "Allow")',
+  '      }',
   '      $acl.AddAccessRule($rule)',
   '      $i.SetAccessControl($acl)',
   '      $count++',
-  '    } catch { }',
+  '    } catch { if ($firstErrors.Count -lt 3) { $firstErrors += ($i.FullName + " -> " + $_.Exception.Message) } }',
   '  }',
-  '  Log ("Took ownership of " + $count + " items under " + $target)',
+  '  if ($firstErrors.Count -gt 0) { Log ("Ownership errors (first 3): " + ($firstErrors -join " | ")) }',
+  '  if ($count -eq 0 -and $items.Count -gt 1) {',
+  '    Log ".NET ownership failed for every item - falling back to takeown.exe/icacls.exe"',
+  '    takeown.exe /f $target /r /d y 2>&1 | Out-Null',
+  '    icacls.exe $target /grant "*S-1-5-32-544:(OI)(CI)F" /t /c /q 2>&1 | Out-Null',
+  '    Log "Fallback complete."',
+  '  }',
+  '  Log ("Took ownership of " + $count + "/" + $items.Count + " items under " + $target)',
+  '}'
+]
+
+/** Deletes $p recursively; any files Windows refuses to release (held by the
+ *  protected Defender engine) are queued in PendingFileRenameOperations so the
+ *  Session Manager deletes them at the next boot, before anything can open
+ *  them. Uses the $p variable already set by the calling step. */
+const deleteWithBootQueuePs = (): string[] => [
+  'if (-not (Test-Path -LiteralPath $p)) { Log "Already gone." } else {',
+  '  Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue',
+  '  if (-not (Test-Path -LiteralPath $p)) { Log ("Removed: " + $p) }',
+  '  else {',
+  '    $locked = @(Get-ChildItem -LiteralPath $p -Recurse -Force -File -ErrorAction SilentlyContinue | Where-Object { -not $_.PSIsContainer })',
+  '    if ($locked.Count -gt 0) {',
+  "      $sm = 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager'",
+  '      $existing = (Get-ItemProperty -Path $sm -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations',
+  '      $entries = @()',
+  '      if ($existing) { $entries = @($existing) }',
+  '      foreach ($f in $locked) { $entries += ("\\??\\" + $f.FullName); $entries += "" }',
+  '      Set-ItemProperty -Path $sm -Name PendingFileRenameOperations -Value $entries -Type MultiString -ErrorAction Stop',
+  '      Log ("Deleted what was removable; queued " + $locked.Count + " locked file(s) for deletion at next boot: " + $p)',
+  '      Log "Empty leftover folders can be removed after the reboot."',
+  '    } else {',
+  '      Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue',
+  '      if (Test-Path -LiteralPath $p) { Log ("Deleted contents; folder tree remains (will clear after reboot): " + $p) } else { Log ("Removed: " + $p) }',
+  '    }',
+  '  }',
   '}'
 ]
 
@@ -223,28 +297,29 @@ function buildDisableSteps(settings: AppSettings, steps: StepDef[], options: Pla
   pushStep(
     steps,
     'svc',
-    'Stop and disable antivirus services',
-    'WinDefend and WdNisSvc are stopped and set to Disabled. Blocked by Tamper Protection if enabled.',
+    'Disable antivirus services',
+    'WinDefend and WdNisSvc set to Disabled via the registry (reliable even for protected services; takes full effect after reboot).',
     'moderate',
     'services',
-    stopAndDisablePs(['WinDefend', 'WdNisSvc'])
+    setServiceStartPs(['WinDefend', 'WdNisSvc'], 4, 'Disabled')
   )
   if (settings.components.securityHealth) {
     pushStep(
       steps,
       'shs',
       'Stop and disable Windows Security Health service',
-      'SecurityHealthService disabled and the SecurityHealthSystray autostart entry removed.',
+      'SecurityHealthService disabled via the registry and the SecurityHealthSystray autostart entry removed.',
       'moderate',
       'securityHealth',
       [
-        'sc.exe stop SecurityHealthService 2>&1 | Out-Null',
-        'sc.exe config SecurityHealthService start= disabled 2>&1 | Out-Null',
+        'try { sc.exe stop SecurityHealthService 2>&1 | Out-Null } catch { }',
         'Stop-Process -Name SecurityHealthSystray -Force -ErrorAction SilentlyContinue',
         "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -Name SecurityHealth -ErrorAction SilentlyContinue",
-        '$shs = Get-Service -Name SecurityHealthService -ErrorAction SilentlyContinue',
-        'if ($shs -and $shs.StartType -ne [System.ServiceProcess.ServiceStartMode]::Disabled) {',
-        '  throw ("SecurityHealthService could NOT be disabled - the change was blocked (access denied). ' + TP_HINT + '")',
+        "  $shsKey = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SecurityHealthService'",
+        'if (Test-Path $shsKey) {',
+        '  Set-ItemProperty -Path $shsKey -Name Start -Value 4 -Type DWord -ErrorAction Stop',
+        '  $check = (Get-ItemProperty -Path $shsKey -Name Start -ErrorAction SilentlyContinue).Start',
+        '  if ($check -ne 4) { throw ("SecurityHealthService could NOT be disabled - " + "' + TP_HINT + '") }',
         '}',
         'Log "Security Health service disabled and tray entry removed."'
       ]
@@ -271,15 +346,16 @@ function buildEnableSteps(steps: StepDef[]): void {
     steps,
     'svc',
     'Re-enable services',
-    'WinDefend -> Automatic, WdNisSvc -> Manual (Demand), SecurityHealthService -> Automatic.',
+    'WinDefend -> Automatic, WdNisSvc -> Manual (Demand), SecurityHealthService -> Automatic, set via the registry (reliable even for protected services).',
     'moderate',
     'services',
     [
-      'foreach ($pair in @(@("WinDefend","auto"), @("WdNisSvc","demand"), @("SecurityHealthService","auto"))) {',
-      '  $n = $pair[0]; $start = $pair[1]',
-      '  if (Get-Service -Name $n -ErrorAction SilentlyContinue) {',
-      '    sc.exe config $n start= $start | Out-Null',
-      '    Log ("Configured " + $n + " -> " + $start + " (exit " + $LASTEXITCODE + ")")',
+      'foreach ($pair in @(@("WinDefend",2), @("WdNisSvc",3), @("SecurityHealthService",2))) {',
+      '  $n = $pair[0]; $v = $pair[1]',
+      "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $n",
+      '  if (Test-Path $key) {',
+      '    Set-ItemProperty -Path $key -Name Start -Value $v -Type DWord -ErrorAction Stop',
+      '    Log ("Re-enabled via registry (Start=" + $v + "): " + $n)',
       '  } else { Log ("Service " + $n + " is missing - was Defender removed? Use Restore instead.") }',
       '}'
     ]
@@ -368,7 +444,7 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
   pushStep(steps, 'pol', 'Apply disable policies first', 'Same policy set as Disable mode, as a pre-step.', 'moderate', 'common', disablePoliciesPs())
   if (c.telemetry) pushStep(steps, 'spy', 'Disable Spynet / MAPS telemetry', 'Stops reporting and sample submission.', 'safe', 'telemetry', disableSpynetPs())
   if (c.smartScreen) pushStep(steps, 'sms', 'Disable SmartScreen', 'Turns off SmartScreen via policy.', 'moderate', 'smartScreen', disableSmartScreenPs())
-  pushStep(steps, 'svc-stop', 'Stop and disable services', 'Stops everything before deletion.', 'moderate', 'services', stopAndDisablePs(['WinDefend', 'WdNisSvc']))
+  pushStep(steps, 'svc-stop', 'Stop and disable services', 'Stops everything before deletion.', 'moderate', 'services', setServiceStartPs(['WinDefend', 'WdNisSvc'], 4, 'Disabled'))
 
   if (options.backup && !options.dryRun) {
     const backupDir = await createBackupDir()
@@ -387,7 +463,7 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
     steps,
     'kill',
     'Stop Defender processes',
-    'Force-stops MsMpEng, NisSrv, SecurityHealthService, SecurityHealthSystray and Configuration Wizard (MsMpEngCore).',
+    'Force-stops MsMpEng, NisSrv, SecurityHealthService, SecurityHealthSystray and ConfigSecurityPolicy. Protected (PPL) processes may survive until reboot - reported, not an error.',
     'moderate',
     'common',
     [
@@ -395,7 +471,9 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       '  Stop-Process -Name $p -Force -ErrorAction SilentlyContinue',
       '}',
       'Start-Sleep -Seconds 2',
-      'Log "Defender processes stopped."'
+      '$still = @(Get-Process -Name MsMpEng,NisSrv -ErrorAction SilentlyContinue)',
+      'if ($still.Count -gt 0) { Log ("Note: " + ($still | ForEach-Object { $_.Name } | Select-Object -Unique) + " still running - it is protected by Windows (PPL) and stops after the reboot.") }',
+      'Log "Defender processes stopped (protected ones noted)."'
     ]
   )
 
@@ -428,13 +506,25 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       steps,
       'sc-del',
       'Delete antivirus services',
-      `sc delete: ${delServices.join(', ')}.`,
+      `Deletes the service registry keys for ${delServices.join(', ')} (sc.exe is blocked on protected services; registry deletion is reliable and takes effect after reboot).`,
       'destructive',
       'services',
       [
+        ...takeOwnershipPrelude(),
+        ...regOwnershipFnPs(),
         `foreach ($s in ${list}) {`,
-        '  sc.exe delete $s | Out-Null',
-        '  Log ("Deleted service " + $s + " (exit " + $LASTEXITCODE + ")")',
+        "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $s",
+        '  if (Test-Path $key) {',
+        '    try { sc.exe delete $s 2>&1 | Out-Null } catch { }',
+        '    Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    if (Test-Path $key) {',
+        '      Log ("Direct delete denied for " + $s + " - taking ownership of the service key")',
+        "      Take-RegKey ('SYSTEM\\CurrentControlSet\\Services\\' + $s)",
+        '      Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    }',
+        '    if (Test-Path $key) { throw ("Could not delete service key " + $s + " - " + "' + TP_HINT + '") }',
+        '    Log ("Deleted service (registry): " + $s)',
+        '  } else { Log ("Service key already gone: " + $s) }',
         '}'
       ]
     )
@@ -443,30 +533,27 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
   if (c.drivers) {
     pushStep(
       steps,
-      'drv-del',
-      'Delete kernel drivers',
-      'Deletes WdFilter, WdBoot and WdNisDrv driver services.',
-      'destructive',
-      'drivers',
-      [
-        "foreach ($d in 'WdFilter','WdBoot','WdNisDrv') {",
-        '  sc.exe stop $d | Out-Null',
-        '  sc.exe delete $d | Out-Null',
-        '  Log ("Deleted driver " + $d + " (exit " + $LASTEXITCODE + ")")',
-        '}'
-      ]
-    )
-    pushStep(
-      steps,
       'drv-reg',
-      'Delete driver registry keys',
-      'Removes leftover driver service keys under HKLM\\SYSTEM\\CurrentControlSet\\Services.',
+      'Delete kernel driver services and keys',
+      'Deletes the WdFilter, WdBoot and WdNisDrv driver service keys (sc.exe is blocked on protected drivers; registry deletion applies after reboot).',
       'destructive',
       'drivers',
       [
-        "foreach ($k in 'WdFilter','WdBoot','WdNisDrv') {",
-        "  $p = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $k",
-        '  if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue; Log ("Deleted key " + $p) }',
+        ...takeOwnershipPrelude(),
+        ...regOwnershipFnPs(),
+        "foreach ($d in 'WdFilter','WdBoot','WdNisDrv') {",
+        "  $key = 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $d",
+        '  if (Test-Path $key) {',
+        '    try { sc.exe stop $d 2>&1 | Out-Null } catch { }',
+        '    try { sc.exe delete $d 2>&1 | Out-Null } catch { }',
+        '    Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    if (Test-Path $key) {',
+        "      Take-RegKey ('SYSTEM\\CurrentControlSet\\Services\\' + $d)",
+        '      Remove-Item -Path $key -Recurse -Force -ErrorAction SilentlyContinue',
+        '    }',
+        '    if (Test-Path $key) { Log ("WARNING: could not delete driver key " + $d + " - it will need a reboot or manual removal") }',
+        '    else { Log ("Deleted driver key: " + $d) }',
+        '  } else { Log ("Driver key already gone: " + $d) }',
         '}'
       ]
     )
@@ -482,10 +569,14 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       'services',
       [
         "foreach ($p in 'HKLM:\\SOFTWARE\\Microsoft\\Windows Defender', 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WdNisSvc') {",
-        '  if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue; Log ("Deleted key " + $p) }',
+        '  if (Test-Path $p) {',
+        '    Remove-Item -Path $p -Recurse -Force -ErrorAction SilentlyContinue',
+        '    if (Test-Path $p) { Log ("WARNING: could not fully delete " + $p + " - it may be protected; the service-key step reports details") }',
+        '    else { Log ("Deleted key " + $p) }',
+        '  }',
         '}',
         "Remove-Item -Path '${POLICY_ROOT}' -Recurse -Force -ErrorAction SilentlyContinue",
-        'Log "Defender registry configuration removed."'
+        'Log "Defender registry configuration handled."'
       ]
     )
   }
@@ -495,7 +586,7 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       steps,
       'own-pf',
       'Take ownership of program files',
-      'Locale-independent ownership/ACL takeover of C:\\Program Files\\Windows Defender (no takeown.exe /d prompt).',
+      'Locale-independent ownership/ACL takeover of C:\\Program Files\\Windows Defender (with takeown/icacls fallback).',
       'destructive',
       'filesProgram',
       takeOwnershipPs('C:\\Program Files\\Windows Defender'),
@@ -505,12 +596,13 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       steps,
       'rm-pf',
       'Delete program files',
-      'Deletes C:\\Program Files\\Windows Defender recursively.',
+      'Deletes C:\\Program Files\\Windows Defender recursively. Files still held by the protected engine are queued for deletion at the next boot.',
       'destructive',
       'filesProgram',
       [
         "$p = 'C:\\Program Files\\Windows Defender'",
-        'if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Continue; Log "Program files removed." } else { Log "Already gone." }'
+        ...deleteWithBootQueuePs(),
+        'Log "Program files handled."'
       ],
       900
     )
@@ -531,12 +623,13 @@ async function buildRemoveSteps(settings: AppSettings, steps: StepDef[], options
       steps,
       'rm-pd',
       'Delete program data',
-      'Deletes C:\\ProgramData\\Microsoft\\Windows Defender (definitions, quarantine, logs).',
+      'Deletes C:\\ProgramData\\Microsoft\\Windows Defender (definitions, quarantine, logs). Files still in use are queued for deletion at the next boot.',
       'destructive',
       'filesData',
       [
         "$p = 'C:\\ProgramData\\Microsoft\\Windows Defender'",
-        'if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Continue; Log "Program data removed." } else { Log "Already gone." }'
+        ...deleteWithBootQueuePs(),
+        'Log "Program data handled."'
       ],
       900
     )
@@ -618,7 +711,9 @@ function buildRestoreSteps(settings: AppSettings, steps: StepDef[], options: Pla
       'common',
       [
         `$dir = ${psq(dir)}`,
-        '$files = Get-ChildItem -Path $dir -Filter "*.reg" -ErrorAction Stop',
+        'if (-not (Test-Path -LiteralPath $dir)) { throw ("Backup folder not found: " + $dir) }',
+        '$files = @(Get-ChildItem -Path $dir -Filter "*.reg" -ErrorAction SilentlyContinue)',
+        'if ($files.Count -eq 0) { throw ("No .reg files found in " + $dir) }',
         'foreach ($f in $files) { reg.exe import $f.FullName 2>&1 | Out-Null; Log ("Imported " + $f.Name) }',
         'Log ("Imported " + $files.Count + " registry files.")'
       ]

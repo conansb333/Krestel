@@ -48,14 +48,27 @@ export async function listBackups(): Promise<BackupInfo[]> {
       }
       let manifest: BackupInfo['manifest'] = null
       try {
-        manifest = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8'))
+        // PowerShell 5.1 writes UTF-8 with a BOM; strip it or JSON.parse fails
+        // (which surfaced as "unknown date" in the UI)
+        const raw = (await fs.readFile(path.join(dir, 'manifest.json'), 'utf8')).replace(/^\uFEFF/, '')
+        manifest = JSON.parse(raw)
       } catch {
         manifest = null
+      }
+      // fall back to the backup folder's own modification time if no manifest,
+      // so the UI never has to show "unknown date"
+      let createdAt = manifest?.createdAt ? Date.parse(manifest.createdAt) || 0 : 0
+      if (!createdAt) {
+        try {
+          createdAt = (await fs.stat(dir)).mtimeMs
+        } catch {
+          createdAt = 0
+        }
       }
       backups.push({
         dir: entry.name,
         name: entry.name,
-        createdAt: manifest?.createdAt ? Date.parse(manifest.createdAt) || 0 : 0,
+        createdAt,
         manifest,
         fileCount,
         sizeBytes
